@@ -1,84 +1,106 @@
+import os
 import requests
+import time
 from twilio.rest import Client
+from dotenv import load_dotenv
 
-VIRTUAL_TWILIO_NUMBER = "your virtual twilio number"
-VERIFIED_NUMBER = "your own phone number verified with Twilio"
+# Load API keys from .env file (safer than hardcoding)
+load_dotenv()
 
+# Twilio credentials & numbers
+VIRTUAL_TWILIO_NUMBER = os.getenv("VIRTUAL_TWILIO_NUMBER")
+VERIFIED_NUMBER = os.getenv("VERIFIED_NUMBER")
+
+# Stock & News API keys
+STOCK_API_KEY = os.getenv("STOCK_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+
+# Twilio credentials
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
+# Stock & Company details
 STOCK_NAME = "TSLA"
 COMPANY_NAME = "Tesla Inc"
 
+# API endpoints
 STOCK_ENDPOINT = "https://www.alphavantage.co/query"
 NEWS_ENDPOINT = "https://newsapi.org/v2/everything"
 
-STOCK_API_KEY = "YOUR OWN API KEY FROM ALPHAVANTAGE"
-NEWS_API_KEY = "YOUR OWN API KEY FROM NEWSAPI"
-TWILIO_SID = "YOUR TWILIO ACCOUNT SID"
-TWILIO_AUTH_TOKEN = "YOUR TWILIO AUTH TOKEN"
+def get_stock_price_difference():
+    """Fetches the stock price difference from Alpha Vantage."""
+    stock_params = {
+        "function": "TIME_SERIES_DAILY",
+        "symbol": STOCK_NAME,
+        "apikey": STOCK_API_KEY,
+    }
 
-## STEP 1: Use https://www.alphavantage.co/documentation/#daily
-# When stock price increase/decreases by 5% between yesterday and the day before yesterday then print("Get News").
+    response = requests.get(STOCK_ENDPOINT, params=stock_params)
+    response.raise_for_status()  # Raise error if request fails
 
-#Get yesterday's closing stock price
-stock_params = {
-    "function": "TIME_SERIES_DAILY",
-    "symbol": STOCK_NAME,
-    "apikey": STOCK_API_KEY,
-}
+    data = response.json().get("Time Series (Daily)", {})
 
-response = requests.get(STOCK_ENDPOINT, params=stock_params)
-data = response.json()["Time Series (Daily)"]
-data_list = [value for (key, value) in data.items()]
-yesterday_data = data_list[0]
-yesterday_closing_price = yesterday_data["4. close"]
-print(yesterday_closing_price)
+    if len(data) < 2:
+        print("Insufficient stock data available.")
+        return None, None
 
-#Get the day before yesterday's closing stock price
-day_before_yesterday_data = data_list[1]
-day_before_yesterday_closing_price = day_before_yesterday_data["4. close"]
-print(day_before_yesterday_closing_price)
+    # Convert stock data into a sorted list (most recent first)
+    data_list = [value for (_, value) in sorted(data.items(), reverse=True)]
 
-#Find the positive difference between 1 and 2. e.g. 40 - 20 = -20, but the positive difference is 20. Hint: https://www.w3schools.com/python/ref_func_abs.asp
-difference = float(yesterday_closing_price) - float(day_before_yesterday_closing_price)
-up_down = None
-if difference > 0:
-    up_down = "🔺"
-else:
-    up_down = "🔻"
+    # Get closing prices
+    yesterday_closing = float(data_list[0]["4. close"])
+    day_before_yesterday_closing = float(data_list[1]["4. close"])
 
-#Work out the percentage difference in price between closing price yesterday and closing price the day before yesterday.
-diff_percent = round((difference / float(yesterday_closing_price)) * 100)
-print(diff_percent)
+    # Calculate difference
+    difference = yesterday_closing - day_before_yesterday_closing
+    percent_change = round((difference / day_before_yesterday_closing) * 100, 2)
+    up_down = "🔺" if difference > 0 else "🔻"
 
+    return percent_change, up_down
 
-    ## STEP 2: Instead of printing ("Get News"), actually get the first 3 news pieces for the COMPANY_NAME.
-
-#Instead of printing ("Get News"), use the News API to get articles related to the COMPANY_NAME.
-#If difference percentage is greater than 5 then print("Get News").
-if abs(diff_percent) > 1:
+def get_news():
+    """Fetches the top 3 news articles related to the company."""
     news_params = {
         "apiKey": NEWS_API_KEY,
         "qInTitle": COMPANY_NAME,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": 3
     }
 
-    news_response = requests.get(NEWS_ENDPOINT, params=news_params)
-    articles = news_response.json()["articles"]
+    response = requests.get(NEWS_ENDPOINT, params=news_params)
+    response.raise_for_status()
 
-    #Use Python slice operator to create a list that contains the first 3 articles. Hint: https://stackoverflow.com/questions/509211/understanding-slice-notation
-    three_articles = articles[:3]
-    print(three_articles)
+    articles = response.json().get("articles", [])
 
-    ## STEP 3: Use Twilio to send a seperate message with each article's title and description to your phone number.
+    if not articles:
+        print("No news articles found.")
+        return []
 
-    #Create a new list of the first 3 article's headline and description using list comprehension.
-    formatted_articles = [f"{STOCK_NAME}: {up_down}{diff_percent}%\nHeadline: {article['title']}. \nBrief: {article['description']}" for article in three_articles]
-    print(formatted_articles)
-    #Send each article as a separate message via Twilio.
+    return [
+        f"{STOCK_NAME}: {up_down}{diff_percent}%\nHeadline: {article['title']}.\nBrief: {article['description']}"
+        for article in articles
+    ]
+
+def send_alerts(messages):
+    """Sends stock news alerts via Twilio SMS."""
     client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
-    #TODO 8. - Send each article as a separate message via Twilio.
-    for article in formatted_articles:
-        message = client.messages.create(
-            body=article,
+    for message in messages:
+        sms = client.messages.create(
+            body=message,
             from_=VIRTUAL_TWILIO_NUMBER,
             to=VERIFIED_NUMBER
         )
+        print(f"Sent: {sms.sid}")
+        time.sleep(1)  # Prevent rate-limiting
+
+if __name__ == "__main__":
+    diff_percent, up_down = get_stock_price_difference()
+
+    if diff_percent and abs(diff_percent) > 5:  # Threshold of 5% change
+        news_messages = get_news()
+        if news_messages:
+            send_alerts(news_messages)
+    else:
+        print("Stock price change is not significant enough for an alert.")
